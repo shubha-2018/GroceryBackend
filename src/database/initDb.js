@@ -1,5 +1,6 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
 
@@ -278,6 +279,19 @@ export const initializeDatabase = async () => {
         );
       }
       console.log(`✅ [MySQL Init] ${initialOffers.length} offers seeded.`);
+    }
+
+    // 8. Seed Default Admin User if not exists
+    const [existingAdmin] = await connection.query("SELECT id FROM users WHERE email = 'admin@grocerymart.com'");
+    if (existingAdmin.length === 0) {
+      console.log(`🌱 [MySQL Init] Seeding default administrator account...`);
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash('admin123', salt);
+      await connection.query(
+        "INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)",
+        ['System Administrator', 'admin@grocerymart.com', hashedPassword, 'admin']
+      );
+      console.log(`✅ [MySQL Init] Admin account created: admin@grocerymart.com (pass: admin123)`);
     }
 
     console.log(`🎉 [MySQL Init] Database setup and seeding complete!\n`);
