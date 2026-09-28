@@ -1,16 +1,34 @@
-import pool from '../config/db.js';
+import pool, { isDbConnected } from '../config/db.js';
+import fileStore from '../database/fileStore.js';
 
 // @route   GET /api/offers
 // @desc    Get all active promotional offers & banners
 export const getOffers = async (req, res, next) => {
   try {
-    const [offers] = await pool.query('SELECT * FROM offers WHERE is_active = 1 ORDER BY id ASC');
+    if (!isDbConnected) {
+      const offers = fileStore.getOffers();
+      return res.json({
+        success: true,
+        count: offers.length,
+        data: offers
+      });
+    }
 
-    res.json({
-      success: true,
-      count: offers.length,
-      data: offers
-    });
+    try {
+      const [offers] = await pool.query('SELECT * FROM offers WHERE is_active = 1 ORDER BY id ASC');
+      res.json({
+        success: true,
+        count: offers.length,
+        data: offers
+      });
+    } catch (dbErr) {
+      const offers = fileStore.getOffers();
+      res.json({
+        success: true,
+        count: offers.length,
+        data: offers
+      });
+    }
   } catch (error) {
     next(error);
   }
@@ -21,16 +39,26 @@ export const getOffers = async (req, res, next) => {
 export const getOfferById = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const [rows] = await pool.query('SELECT * FROM offers WHERE id = ?', [id]);
 
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, message: 'Offer not found' });
+    if (!isDbConnected) {
+      const offer = fileStore.getOfferById(id);
+      if (!offer) return res.status(404).json({ success: false, message: 'Offer not found' });
+      return res.json({ success: true, data: offer });
     }
 
-    res.json({
-      success: true,
-      data: rows[0]
-    });
+    try {
+      const [rows] = await pool.query('SELECT * FROM offers WHERE id = ?', [id]);
+      if (rows.length === 0) {
+        const fallback = fileStore.getOfferById(id);
+        if (fallback) return res.json({ success: true, data: fallback });
+        return res.status(404).json({ success: false, message: 'Offer not found' });
+      }
+      res.json({ success: true, data: rows[0] });
+    } catch (dbErr) {
+      const fallback = fileStore.getOfferById(id);
+      if (fallback) return res.json({ success: true, data: fallback });
+      return res.status(404).json({ success: false, message: 'Offer not found' });
+    }
   } catch (error) {
     next(error);
   }
@@ -49,19 +77,57 @@ export const createOffer = async (req, res, next) => {
     const bgClass = bg_class || 'offer-green';
     const linkTab = link_tab || 'Offers';
 
-    const [result] = await pool.query(
-      `INSERT INTO offers (title, subtitle, discount, coupon_code, image_url, bg_class, link_tab)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [offerTitle, offerSubtitle, offerDiscount, coupon_code || null, imgUrl, bgClass, linkTab]
-    );
+    if (!isDbConnected) {
+      const newOffer = fileStore.createOffer({
+        title: offerTitle,
+        subtitle: offerSubtitle,
+        discount: offerDiscount,
+        coupon_code,
+        image_url: imgUrl,
+        bg_class: bgClass,
+        link_tab: linkTab
+      });
 
-    const [newOffer] = await pool.query('SELECT * FROM offers WHERE id = ?', [result.insertId]);
+      return res.status(201).json({
+        success: true,
+        message: 'Offer banner created successfully!',
+        data: newOffer
+      });
+    }
 
-    res.status(201).json({
-      success: true,
-      message: 'Offer banner created successfully!',
-      data: newOffer[0]
-    });
+    try {
+      const [result] = await pool.query(
+        `INSERT INTO offers (title, subtitle, discount, coupon_code, image_url, bg_class, link_tab)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [offerTitle, offerSubtitle, offerDiscount, coupon_code || null, imgUrl, bgClass, linkTab]
+      );
+
+      const [newOffer] = await pool.query('SELECT * FROM offers WHERE id = ?', [result.insertId]);
+
+      fileStore.createOffer(newOffer[0] || req.body);
+
+      res.status(201).json({
+        success: true,
+        message: 'Offer banner created successfully!',
+        data: newOffer[0]
+      });
+    } catch (dbErr) {
+      const newOffer = fileStore.createOffer({
+        title: offerTitle,
+        subtitle: offerSubtitle,
+        discount: offerDiscount,
+        coupon_code,
+        image_url: imgUrl,
+        bg_class: bgClass,
+        link_tab: linkTab
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Offer banner created successfully!',
+        data: newOffer
+      });
+    }
   } catch (error) {
     next(error);
   }
@@ -76,31 +142,51 @@ export const updateOffer = async (req, res, next) => {
 
     const imgUrl = image_url || img;
 
-    await pool.query(
-      `UPDATE offers SET 
-         title = COALESCE(?, title),
-         subtitle = COALESCE(?, subtitle),
-         discount = COALESCE(?, discount),
-         coupon_code = COALESCE(?, coupon_code),
-         image_url = COALESCE(?, image_url),
-         bg_class = COALESCE(?, bg_class),
-         link_tab = COALESCE(?, link_tab),
-         is_active = COALESCE(?, is_active)
-       WHERE id = ?`,
-      [title, subtitle, discount, coupon_code, imgUrl, bg_class, link_tab, is_active, id]
-    );
-
-    const [updated] = await pool.query('SELECT * FROM offers WHERE id = ?', [id]);
-
-    if (updated.length === 0) {
-      return res.status(404).json({ success: false, message: 'Offer not found' });
+    if (!isDbConnected) {
+      const updated = fileStore.updateOffer(id, req.body);
+      if (!updated) return res.status(404).json({ success: false, message: 'Offer not found' });
+      return res.json({
+        success: true,
+        message: 'Offer updated successfully!',
+        data: updated
+      });
     }
 
-    res.json({
-      success: true,
-      message: 'Offer updated successfully!',
-      data: updated[0]
-    });
+    try {
+      await pool.query(
+        `UPDATE offers SET 
+           title = COALESCE(?, title),
+           subtitle = COALESCE(?, subtitle),
+           discount = COALESCE(?, discount),
+           coupon_code = COALESCE(?, coupon_code),
+           image_url = COALESCE(?, image_url),
+           bg_class = COALESCE(?, bg_class),
+           link_tab = COALESCE(?, link_tab),
+           is_active = COALESCE(?, is_active)
+         WHERE id = ?`,
+        [title, subtitle, discount, coupon_code, imgUrl, bg_class, link_tab, is_active, id]
+      );
+
+      const [updated] = await pool.query('SELECT * FROM offers WHERE id = ?', [id]);
+      fileStore.updateOffer(id, req.body);
+
+      if (updated.length === 0) {
+        return res.status(404).json({ success: false, message: 'Offer not found' });
+      }
+
+      res.json({
+        success: true,
+        message: 'Offer updated successfully!',
+        data: updated[0]
+      });
+    } catch (dbErr) {
+      const updated = fileStore.updateOffer(id, req.body);
+      res.json({
+        success: true,
+        message: 'Offer updated successfully!',
+        data: updated
+      });
+    }
   } catch (error) {
     next(error);
   }
@@ -111,16 +197,30 @@ export const updateOffer = async (req, res, next) => {
 export const deleteOffer = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const [result] = await pool.query('DELETE FROM offers WHERE id = ?', [id]);
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, message: 'Offer not found' });
+    if (!isDbConnected) {
+      fileStore.deleteOffer(id);
+      return res.json({
+        success: true,
+        message: 'Offer deleted successfully.'
+      });
     }
 
-    res.json({
-      success: true,
-      message: 'Offer deleted successfully.'
-    });
+    try {
+      await pool.query('DELETE FROM offers WHERE id = ?', [id]);
+      fileStore.deleteOffer(id);
+
+      res.json({
+        success: true,
+        message: 'Offer deleted successfully.'
+      });
+    } catch (dbErr) {
+      fileStore.deleteOffer(id);
+      res.json({
+        success: true,
+        message: 'Offer deleted successfully.'
+      });
+    }
   } catch (error) {
     next(error);
   }

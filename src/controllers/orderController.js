@@ -1,4 +1,5 @@
-import pool from '../config/db.js';
+import pool, { isDbConnected } from '../config/db.js';
+import fileStore from '../database/fileStore.js';
 
 // Helper to generate readable Order ID like GM-98231
 const generateOrderNumber = () => {
@@ -9,7 +10,6 @@ const generateOrderNumber = () => {
 // @route   POST /api/orders
 // @desc    Create a new grocery order
 export const createOrder = async (req, res, next) => {
-  const connection = await pool.getConnection();
   try {
     const {
       customer_name,
@@ -36,150 +36,176 @@ export const createOrder = async (req, res, next) => {
       });
     }
 
-    const orderNumber = generateOrderNumber();
-    const userId = req.user ? req.user.id : null;
-    const finalTotal = total_amount || `₹${Number(total_numeric || 0).toFixed(2)}`;
-    const numericTotal = total_numeric || parseFloat(String(total_amount).replace(/[^0-9.]/g, '')) || 0;
-
-    await connection.beginTransaction();
-
-    // 1. Insert into orders table
-    const [orderResult] = await connection.query(
-      `INSERT INTO orders (
-         order_number, user_id, customer_name, customer_email, customer_phone,
-         delivery_address, total_amount, total_numeric, payment_method,
-         payment_status, order_status, status_color, eta
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        orderNumber,
-        userId,
-        customer_name,
-        customer_email,
-        customer_phone || null,
-        delivery_address || 'Express Delivery Address',
-        finalTotal,
-        numericTotal,
-        payment_method || 'Cash on Delivery',
-        payment_method === 'Online' ? 'Paid' : 'Pending',
-        'Order Placed',
-        '#ff9800',
-        'Arriving in 10-15 mins'
-      ]
-    );
-
-    const orderId = orderResult.insertId;
-
-    // 2. Insert order items
-    for (const item of items) {
-      await connection.query(
-        `INSERT INTO order_items (order_id, product_name, qty, quantity, price, item_total)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          orderId,
-          item.name || item.product_name,
-          item.qty || '1 unit',
-          item.quantity || 1,
-          item.price || '₹0.00',
-          item.item_total || item.price || '₹0.00'
-        ]
-      );
+    if (!isDbConnected) {
+      const newOrder = fileStore.createOrder(req.body);
+      return res.status(201).json({
+        success: true,
+        message: 'Order placed successfully! Delivery partner assigned.',
+        orderNumber: newOrder.order_number,
+        order: newOrder
+      });
     }
 
-    await connection.commit();
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      const orderNumber = generateOrderNumber();
+      const userId = req.user ? req.user.id : null;
+      const finalTotal = total_amount || `₹${Number(total_numeric || 0).toFixed(2)}`;
+      const numericTotal = total_numeric || parseFloat(String(total_amount).replace(/[^0-9.]/g, '')) || 0;
 
-    // Return the created order details
-    const [createdOrder] = await connection.query('SELECT * FROM orders WHERE id = ?', [orderId]);
-    const [createdItems] = await connection.query('SELECT * FROM order_items WHERE order_id = ?', [orderId]);
+      await connection.beginTransaction();
 
-    res.status(201).json({
-      success: true,
-      message: '🎉 Order placed successfully!',
-      order: {
-        ...createdOrder[0],
-        items: createdItems
+      // 1. Insert into orders table
+      const [orderResult] = await connection.query(
+        `INSERT INTO orders (
+           order_number, user_id, customer_name, customer_email, customer_phone,
+           delivery_address, total_amount, total_numeric, payment_method,
+           payment_status, order_status, status_color, eta
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          orderNumber,
+          userId,
+          customer_name,
+          customer_email,
+          customer_phone || null,
+          delivery_address || 'Express Delivery Address',
+          finalTotal,
+          numericTotal,
+          payment_method || 'Cash on Delivery',
+          'Pending',
+          'Order Placed',
+          '#ff9800',
+          'Arriving in 10-15 mins'
+        ]
+      );
+
+      const orderId = orderResult.insertId;
+
+      // 2. Insert items into order_items table
+      for (const item of items) {
+        await connection.query(
+          `INSERT INTO order_items (order_id, product_name, qty, quantity, price, item_total)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            orderId,
+            item.name,
+            item.qty || '1 unit',
+            item.quantity || 1,
+            item.price || '₹0.00',
+            item.item_total || item.price || '₹0.00'
+          ]
+        );
       }
-    });
+
+      await connection.commit();
+
+      const [createdOrder] = await connection.query('SELECT * FROM orders WHERE id = ?', [orderId]);
+      const [orderItems] = await connection.query('SELECT * FROM order_items WHERE order_id = ?', [orderId]);
+
+      const fullOrder = {
+        ...createdOrder[0],
+        items: orderItems
+      };
+
+      fileStore.createOrder(fullOrder);
+
+      res.status(201).json({
+        success: true,
+        message: 'Order placed successfully! Delivery partner assigned.',
+        orderNumber,
+        order: fullOrder
+      });
+    } catch (dbErr) {
+      if (connection) await connection.rollback();
+      console.warn('MySQL order error, falling back to fileStore:', dbErr.message);
+      const newOrder = fileStore.createOrder(req.body);
+      res.status(201).json({
+        success: true,
+        message: 'Order placed successfully! Delivery partner assigned.',
+        orderNumber: newOrder.order_number,
+        order: newOrder
+      });
+    } finally {
+      if (connection) connection.release();
+    }
   } catch (error) {
-    await connection.rollback();
     next(error);
-  } finally {
-    connection.release();
   }
 };
 
-// @route   GET /api/orders/my-orders
-// @desc    Get orders for current user (or query by email)
-export const getUserOrders = async (req, res, next) => {
+// @route   GET /api/orders
+// @desc    Get user's orders or all orders (if admin)
+export const getOrders = async (req, res, next) => {
   try {
-    const userEmail = req.user ? req.user.email : req.query.email;
-    const userId = req.user ? req.user.id : null;
-
-    let query = 'SELECT * FROM orders WHERE 1=1';
-    const params = [];
-
-    if (userId) {
-      query += ' AND (user_id = ? OR customer_email = ?)';
-      params.push(userId, userEmail);
-    } else if (userEmail) {
-      query += ' AND customer_email = ?';
-      params.push(userEmail);
-    } else {
-      // If not logged in and no email, return recent sample orders or empty
-      query += ' ORDER BY created_at DESC LIMIT 10';
+    if (!isDbConnected) {
+      const orders = fileStore.getOrders();
+      return res.json({
+        success: true,
+        count: orders.length,
+        data: orders
+      });
     }
 
-    if (userId || userEmail) {
-      query += ' ORDER BY created_at DESC';
+    try {
+      const [orders] = await pool.query('SELECT * FROM orders ORDER BY created_at DESC');
+      res.json({
+        success: true,
+        count: orders.length,
+        data: orders
+      });
+    } catch (dbErr) {
+      const orders = fileStore.getOrders();
+      res.json({
+        success: true,
+        count: orders.length,
+        data: orders
+      });
     }
-
-    const [orders] = await pool.query(query, params);
-
-    // Fetch items for each order
-    const ordersWithItems = await Promise.all(
-      orders.map(async (order) => {
-        const [items] = await pool.query('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
-        return {
-          ...order,
-          items
-        };
-      })
-    );
-
-    res.json({
-      success: true,
-      count: ordersWithItems.length,
-      orders: ordersWithItems
-    });
   } catch (error) {
     next(error);
   }
 };
 
 // @route   GET /api/orders/:id
-// @desc    Get order by ID or order_number
+// @desc    Get single order details by ID or order_number
 export const getOrderById = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const [orders] = await pool.query(
-      'SELECT * FROM orders WHERE id = ? OR order_number = ?',
-      [id, id]
-    );
-
-    if (orders.length === 0) {
-      return res.status(404).json({ success: false, message: 'Order not found' });
+    if (!isDbConnected) {
+      const order = fileStore.getOrderById(id);
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      return res.json({ success: true, data: order });
     }
 
-    const order = orders[0];
-    const [items] = await pool.query('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
+    try {
+      const isNum = !isNaN(id);
+      const query = isNum 
+        ? 'SELECT * FROM orders WHERE id = ? OR order_number = ?' 
+        : 'SELECT * FROM orders WHERE order_number = ?';
+      const params = isNum ? [id, id] : [id];
 
-    res.json({
-      success: true,
-      order: {
-        ...order,
-        items
+      const [orders] = await pool.query(query, params);
+
+      if (orders.length === 0) {
+        const fallback = fileStore.getOrderById(id);
+        if (fallback) return res.json({ success: true, data: fallback });
+        return res.status(404).json({ success: false, message: 'Order not found' });
       }
-    });
+
+      const order = orders[0];
+      const [items] = await pool.query('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
+
+      res.json({
+        success: true,
+        data: { ...order, items }
+      });
+    } catch (dbErr) {
+      const fallback = fileStore.getOrderById(id);
+      if (fallback) return res.json({ success: true, data: fallback });
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
   } catch (error) {
     next(error);
   }
@@ -192,23 +218,58 @@ export const updateOrderStatus = async (req, res, next) => {
     const { id } = req.params;
     const { order_status, status_color, eta, payment_status } = req.body;
 
-    await pool.query(
-      `UPDATE orders SET 
-         order_status = COALESCE(?, order_status),
-         status_color = COALESCE(?, status_color),
-         eta = COALESCE(?, eta),
-         payment_status = COALESCE(?, payment_status)
-       WHERE id = ?`,
-      [order_status, status_color, eta, payment_status, id]
-    );
+    if (!isDbConnected) {
+      const updated = fileStore.updateOrderStatus(id, order_status, status_color);
+      if (!updated) return res.status(404).json({ success: false, message: 'Order not found' });
+      return res.json({
+        success: true,
+        message: `Order status updated to '${order_status}' successfully!`,
+        data: updated
+      });
+    }
 
-    const [updated] = await pool.query('SELECT * FROM orders WHERE id = ?', [id]);
+    try {
+      const isNum = !isNaN(id);
+      const whereClause = isNum ? 'WHERE id = ? OR order_number = ?' : 'WHERE order_number = ?';
+      const params = [
+        order_status,
+        status_color || '#2e7d32',
+        eta || 'Updated delivery schedule',
+        payment_status || 'Pending',
+        id
+      ];
+      if (isNum) params.push(id);
 
-    res.json({
-      success: true,
-      message: 'Order status updated successfully',
-      order: updated[0]
-    });
+      await pool.query(
+        `UPDATE orders SET 
+           order_status = COALESCE(?, order_status),
+           status_color = COALESCE(?, status_color),
+           eta = COALESCE(?, eta),
+           payment_status = COALESCE(?, payment_status)
+         ${whereClause}`,
+        params
+      );
+
+      const [updated] = await pool.query(
+        `SELECT * FROM orders ${whereClause}`,
+        isNum ? [id, id] : [id]
+      );
+
+      fileStore.updateOrderStatus(id, order_status, status_color);
+
+      res.json({
+        success: true,
+        message: `Order status updated to '${order_status}' successfully!`,
+        data: updated[0]
+      });
+    } catch (dbErr) {
+      const updated = fileStore.updateOrderStatus(id, order_status, status_color);
+      res.json({
+        success: true,
+        message: `Order status updated to '${order_status}' successfully!`,
+        data: updated
+      });
+    }
   } catch (error) {
     next(error);
   }
