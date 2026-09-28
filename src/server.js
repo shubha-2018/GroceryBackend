@@ -12,9 +12,24 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS configuration - allow Vite dev server and production clients
+// CORS configuration - allow Vite dev server, production store, and separate Vercel admin URL
+const allowedOrigins = [
+  'http://localhost:5173', 
+  'http://localhost:3000', 
+  'http://127.0.0.1:5173', 
+  process.env.CLIENT_URL,
+  process.env.ADMIN_URL
+].filter(Boolean);
+
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173', process.env.CLIENT_URL].filter(Boolean),
+  origin: (origin, callback) => {
+    // Allow server-to-server or tools without origin (like Postman or curl)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    return callback(null, true); // Permissive in dev/production with credentials
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
