@@ -167,6 +167,60 @@ export const getOrders = async (req, res, next) => {
   }
 };
 
+// @route   GET /api/orders/my-orders
+// @desc    Get orders for current user or customer
+export const getUserOrders = async (req, res, next) => {
+  try {
+    const userId = req.user ? req.user.id : null;
+    const userEmail = req.user ? req.user.email : req.query.email;
+
+    if (!isDbConnected) {
+      let orders = fileStore.getOrders();
+      if (userEmail) {
+        orders = orders.filter(o => o.customer_email === userEmail);
+      }
+      return res.json({
+        success: true,
+        count: orders.length,
+        data: orders
+      });
+    }
+
+    try {
+      let query = 'SELECT * FROM orders';
+      const params = [];
+
+      if (userId) {
+        query += ' WHERE user_id = ?';
+        params.push(userId);
+      } else if (userEmail) {
+        query += ' WHERE customer_email = ?';
+        params.push(userEmail);
+      }
+      query += ' ORDER BY created_at DESC';
+
+      const [orders] = await pool.query(query, params);
+      res.json({
+        success: true,
+        count: orders.length,
+        data: orders
+      });
+    } catch (dbErr) {
+      let orders = fileStore.getOrders();
+      if (userEmail) {
+        orders = orders.filter(o => o.customer_email === userEmail);
+      }
+      res.json({
+        success: true,
+        count: orders.length,
+        data: orders
+      });
+    }
+  } catch (error) {
+    next(error);
+  }
+};
+
 // @route   GET /api/orders/:id
 // @desc    Get single order details by ID or order_number
 export const getOrderById = async (req, res, next) => {

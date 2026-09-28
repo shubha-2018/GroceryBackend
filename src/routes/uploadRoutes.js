@@ -33,7 +33,8 @@ router.post('/', async (req, res, next) => {
         const filePath = path.join(uploadsDir, uniqueName);
 
         fs.writeFileSync(filePath, base64Data, 'base64');
-        const fileUrl = `http://localhost:5000/uploads/${uniqueName}`;
+        const hostUrl = `${req.protocol}://${req.get('host')}`;
+        const fileUrl = `${hostUrl}/uploads/${uniqueName}`;
 
         return res.json({
           success: true,

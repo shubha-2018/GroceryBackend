@@ -1,6 +1,7 @@
 import express from 'express';
 import {
   createOrder,
+  getOrders,
   getUserOrders,
   getOrderById,
   updateOrderStatus
@@ -11,6 +12,7 @@ const router = express.Router();
 
 // Public / User routes
 router.post('/', createOrder);
+router.get('/', getOrders);
 router.get('/my-orders', getUserOrders);
 router.get('/:id', getOrderById);
 
